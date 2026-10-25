@@ -227,3 +227,13 @@ body.locked { overflow: hidden; }
 .savebar { position: sticky; bottom: calc(64px + env(safe-area-inset-bottom)); z-index: 5; margin: 16px -4px 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px 8px 8px 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, .12); font-size: 13px; color: var(--text-2); }
 .savebar [data-state="ok"] { color: var(--good); }
 .savebar [data-state="error"] { color: var(--critical); }
+
+/* Farm care */
+.chip.warn { background: #fdf0d5; color: #8a5a00; }
+.banner.remind { background: #fdf0d5; color: #4a3300; }
+.remind-row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0 0; color: inherit; text-decoration: none; font-size: 14px; }
+.remind-row .bad { color: var(--critical); font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .chip.warn, :root:not([data-theme="light"]) .banner.remind { background: #3a2c10; color: #f3d28c; }
+}
+:root[data-theme="dark"] .chip.warn, :root[data-theme="dark"] .banner.remind { background: #3a2c10; color: #f3d28c; }

@@ -12,9 +12,13 @@ const SCHEMA = {
   dehuskWorkers: { num: ['fee', 'sortOrder', 'updatedAt'] },
   sales:         { num: ['updatedAt'] },
   saleItems:     { num: ['kg', 'rate', 'total', 'sortOrder', 'updatedAt'], bool: ['paid'] },
+  jobs:          { num: ['plants', 'updatedAt'] },
+  jobWorkers:    { num: ['fee', 'sortOrder', 'updatedAt'] },
+  jobItems:      { num: ['qty', 'rate', 'amount', 'sortOrder', 'updatedAt'] },
+  jobExpenses:   { num: ['amount', 'sortOrder', 'updatedAt'] },
 };
 const TABLES = Object.keys(SCHEMA);
-const TEXT_FIELDS = ['date', 'status', 'name', 'type', 'customer', 'notes'];
+const TEXT_FIELDS = ['date', 'status', 'name', 'type', 'customer', 'notes', 'kind', 'unit'];
 
 /* ---------- Utilities ---------- */
 
@@ -121,6 +125,69 @@ const salesOf = sid => db().sales.filter(s => s.sessionId === sid).sort(byDate);
 const itemsOf = saleId => db().saleItems.filter(i => i.saleId === saleId).sort(bySort);
 const sessionsAsc = () => [...db().sessions].sort(byDate);
 const isActive = s => s.status === 'active';
+
+/* ---------- Farm care (fertilizing & pesticide) ---------- */
+
+const KIND = {
+  fertilizer: { label: 'Fertilizing', icon: '🌱', materials: 'Fertilizers purchased', material: 'Fertilizer' },
+  pesticide: { label: 'Pesticide', icon: '🧴', materials: 'Pesticides', material: 'Pesticide' },
+};
+const prefs = Object.assign({ fertLagMin: 8, fertLagMax: 12, pestLag: 12, remindDays: 14 }, loadJSON('cp.prefs', {}));
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const addDays = (date, n) => { const x = parseDate(date); x.setDate(x.getDate() + n); return ymd(x); };
+function addMonths(date, n) {
+  const x = parseDate(date);
+  const day = x.getDate();
+  x.setDate(1);
+  x.setMonth(x.getMonth() + n);
+  x.setDate(Math.min(day, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate()));
+  return ymd(x);
+}
+const fmtMonth = d => parseDate(d).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+const jobsOf = kind => db().jobs.filter(j => j.kind === kind);
+const jobWorkersOf = id => db().jobWorkers.filter(w => w.jobId === id).sort(bySort);
+const jobItemsOf = id => db().jobItems.filter(i => i.jobId === id).sort(bySort);
+const jobExpensesOf = id => db().jobExpenses.filter(x => x.jobId === id).sort(bySort);
+const isPlanned = j => j.status === 'planned';
+const jobName = j => String(j.name || '').trim() || `${KIND[j.kind] ? KIND[j.kind].label : 'Care'} ${fmtDate(j.date)}`;
+
+function jobStats(j) {
+  const labour = sum(jobWorkersOf(j.id), 'fee');
+  const materials = sum(jobItemsOf(j.id), 'amount');
+  const other = sum(jobExpensesOf(j.id), 'amount');
+  return { labour, materials, other, total: labour + materials + other };
+}
+function deleteJob(id) {
+  jobWorkersOf(id).forEach(w => del('jobWorkers', w.id));
+  jobItemsOf(id).forEach(i => del('jobItems', i.id));
+  jobExpensesOf(id).forEach(x => del('jobExpenses', x.id));
+  del('jobs', id);
+}
+
+// Which care sessions are expected to show up in a given plucking's harvest.
+function fertForPlucking(s) {
+  const from = addMonths(s.date, -prefs.fertLagMax), to = addMonths(s.date, -prefs.fertLagMin);
+  return jobsOf('fertilizer').filter(j => !isPlanned(j) && j.date >= from && j.date <= to).sort(byDate);
+}
+function pestForPlucking(s) {
+  const from = addMonths(s.date, -prefs.pestLag);
+  return jobsOf('pesticide').filter(j => !isPlanned(j) && j.date > from && j.date <= s.date).sort(byDate);
+}
+
+function dueReminders() {
+  const limit = addDays(today(), prefs.remindDays);
+  return jobsOf('pesticide').filter(j => isPlanned(j) && j.date && j.date <= limit).sort(byDate);
+}
+function dueText(j) {
+  const d = daysBetween(today(), j.date);
+  return d < 0 ? `overdue by ${plural(-d, 'day')}` : d === 0 ? 'due today' : `due in ${plural(d, 'day')}`;
+}
+function reminderBanner() {
+  const due = dueReminders();
+  if (!due.length) return '';
+  return `<div class="banner remind"><strong>🔔 Pesticide reminder</strong>${due.map(j => `
+    <a class="remind-row" href="#/care/${j.id}"><span>${h(jobName(j))} · ${fmtDate(j.date)}</span><span class="${j.date < today() ? 'bad' : ''}">${dueText(j)}</span></a>`).join('')}</div>`;
+}
 
 // Derived totals: computed from detail rows when present, else the stored value (older data).
 const plotTreeTotal = p => { const r = treeRecsOfPlot(p.id); return r.length ? sum(r, 'trees') : (p.trees || 0); };
@@ -468,6 +535,7 @@ function viewHome() {
 
   return {
     html: `
+      ${reminderBanner()}
       ${configured() ? '' : `<div class="banner">Data is saved on this device only. <a href="#/settings">Connect Google Sheets</a> to back it up and use it on other devices.</div>`}
       ${active.map(s => sessionCard(s, prevOf(s))).join('')}
       <button class="btn primary block" data-action="newSession" style="margin-bottom:12px">+ Start new plucking session</button>
@@ -613,6 +681,7 @@ function viewSession(id) {
       <div class="section-title"><h2>Sales</h2><button class="btn sm" data-action="addSale" data-id="${id}">+ New sales session</button></div>
       ${saleCards || '<p class="muted small">No sales yet.</p>'}
 
+      ${linkedCareCard(s)}
       <div class="section-title"><h2>Summary</h2></div>
       <div class="card">
         <div class="kv"><span>Workers fee</span>${calc('workerFee')}</div>
@@ -847,6 +916,7 @@ function viewAnalytics() {
       ${plotNames.length ? `<div class="card"><h3>Plots across sessions (coconuts)</h3><div class="table-wrap"><table>
         <thead><tr><th>Plot</th>${cols.map(c => `<th>${fmtShortDate(c.s.date)}</th>`).join('')}</tr></thead>
         <tbody>${plotRows}</tbody></table></div></div>` : ''}
+      ${careAnalytics(all, recent, labels, titles)}
       ${workerRows ? `<div class="card"><h3>Workers</h3><div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Role</th><th>Sessions</th><th>Trees climbed</th><th>₹/tree</th><th>Total paid</th></tr></thead>
         <tbody>${workerRows}</tbody></table></div></div>` : ''}
@@ -875,6 +945,17 @@ function viewSettings() {
         <p class="small muted" style="margin-top:10px">${calc('syncInfo')}</p>
       </div>
       <div class="card">
+        <h2>Farm care analysis & reminders</h2>
+        <p class="muted small">How long fertilizer takes to show in the harvest, and when pesticide reminders start.</p>
+        <div class="grid g2">
+          <label class="field">Fertilizer effect from (months)<input id="prefFertLagMin" type="number" inputmode="numeric" min="0" value="${prefs.fertLagMin}"></label>
+          <label class="field">Fertilizer effect until (months)<input id="prefFertLagMax" type="number" inputmode="numeric" min="0" value="${prefs.fertLagMax}"></label>
+          <label class="field">Pesticide linked to harvests within (months)<input id="prefPestLag" type="number" inputmode="numeric" min="1" value="${prefs.pestLag}"></label>
+          <label class="field">Remind before a pesticide round (days)<input id="prefRemindDays" type="number" inputmode="numeric" min="0" value="${prefs.remindDays}"></label>
+        </div>
+        <p class="muted small" style="margin-bottom:0">Email reminders come from your Google Sheet's Apps Script (daily, from 14 days before). See README.</p>
+      </div>
+      <div class="card">
         <h2>Backup</h2>
         <p class="muted small">Download everything on this device as a JSON file.</p>
         <button class="btn" data-action="exportJson">Download backup</button>
@@ -886,6 +967,248 @@ function viewSettings() {
         store.syncError ? `Last error: ${store.syncError}` : '',
       ].filter(Boolean).join(' · '),
     }),
+  };
+}
+
+function linkedCareCard(s) {
+  const fert = fertForPlucking(s), pest = pestForPlucking(s);
+  const line = j => `<div class="kv small"><a href="#/care/${j.id}">${KIND[j.kind].icon} ${h(jobName(j))} · ${fmtDate(j.date)}${j.kind === 'pesticide' && j.plants ? ` · ${plural(j.plants, 'sapling')}` : ''}</a><span>${inr(jobStats(j).total)}</span></div>`;
+  return `
+    <div class="section-title"><h2>Farm care for this harvest</h2></div>
+    <div class="card">
+      <h3>Fertilizer ${prefs.fertLagMin}–${prefs.fertLagMax} months earlier (${fmtMonth(addMonths(s.date, -prefs.fertLagMax))} – ${fmtMonth(addMonths(s.date, -prefs.fertLagMin))})</h3>
+      ${fert.map(line).join('') || '<p class="muted small" style="margin:0 0 8px">None recorded in that window.</p>'}
+      <h3 style="margin-top:10px">Pesticide in the ${prefs.pestLag} months before</h3>
+      ${pest.map(line).join('') || '<p class="muted small" style="margin:0">None recorded.</p>'}
+    </div>`;
+}
+
+function careAnalytics(all, recent, labels, titles) {
+  const rows = all.map(x => {
+    const fert = fertForPlucking(x.s), pest = pestForPlucking(x.s);
+    return { x, fert, pest, fertSpend: sum(fert.map(j => jobStats(j).total)), pestSpend: sum(pest.map(j => jobStats(j).total)), plants: sum(pest, 'plants') };
+  });
+  if (!db().jobs.some(j => !isPlanned(j))) {
+    return `<div class="card"><h3>Farm care vs production</h3><p class="muted small" style="margin:0">Record fertilizing and pesticide sessions in Farm care to see how they relate to later harvests.</p></div>`;
+  }
+  const avg = list => { const v = list.map(r => r.x.perTree).filter(v => v !== null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const withF = rows.filter(r => r.fert.length), withoutF = rows.filter(r => !r.fert.length);
+  const insight = withF.length && withoutF.length && avg(withF) !== null && avg(withoutF) !== null
+    ? `<p class="small" style="margin-top:0">Harvests with fertilizer applied ${prefs.fertLagMin}–${prefs.fertLagMax} months earlier averaged <strong>${nf1.format(avg(withF))}</strong> coconuts per tree, against <strong>${nf1.format(avg(withoutF))}</strong> without (${withF.length} vs ${withoutF.length} pluckings).</p>`
+    : `<p class="muted small" style="margin-top:0">A comparison appears once there are pluckings both with and without fertilizer in the ${prefs.fertLagMin}–${prefs.fertLagMax} month window.</p>`;
+  const recentRows = rows.slice(-recent.length);
+  const table = [...rows].reverse().map(r => `<tr>
+      <td><a href="#/session/${r.x.s.id}">${h(sessionName(r.x.s))}</a><div class="muted small">${fmtDate(r.x.s.date)}</div></td>
+      <td>${num(r.x.coconuts)}</td><td>${dash(r.x.perTree, nf1.format)}</td>
+      <td>${r.fertSpend ? inr(r.fertSpend) : '—'}<div class="muted small">${r.fert.map(j => h(jobName(j))).join(', ')}</div></td>
+      <td>${r.pestSpend ? inr(r.pestSpend) : '—'}</td><td>${r.plants ? num(r.plants) : '—'}</td>
+    </tr>`).join('');
+
+  // Yearly view: everything spent and earned in each calendar year.
+  const years = new Map();
+  const yr = d => String(d).slice(0, 4);
+  const Y = k => { if (!years.has(k)) years.set(k, { pluckings: 0, coconuts: 0, sales: 0, pluckCost: 0, fert: 0, pest: 0 }); return years.get(k); };
+  all.forEach(x => { const y = Y(yr(x.s.date)); y.pluckings++; y.coconuts += x.coconuts; y.sales += x.revenue; y.pluckCost += x.cost; });
+  db().jobs.filter(j => !isPlanned(j) && j.date).forEach(j => { Y(yr(j.date))[j.kind === 'pesticide' ? 'pest' : 'fert'] += jobStats(j).total; });
+  const yearRows = [...years.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([y, v]) =>
+    `<tr><td>${y}</td><td>${v.pluckings}</td><td>${num(v.coconuts)}</td><td>${inr(v.sales)}</td><td>${inr(v.pluckCost)}</td><td>${inr(v.fert)}</td><td>${inr(v.pest)}</td><td>${inr(v.sales - v.pluckCost - v.fert - v.pest)}</td></tr>`).join('');
+
+  return `
+    <div class="card"><h3>Farm care vs production</h3>
+      <p class="muted small" style="margin-top:0">Fertilizer is linked to harvests ${prefs.fertLagMin}–${prefs.fertLagMax} months later; pesticide to harvests in the following ${prefs.pestLag} months.</p>
+      ${insight}
+      <h3>Fertilizer spend linked to each plucking</h3>
+      ${barChart({ labels, titles, money: true, fmt: inr, series: [{ name: 'Fertilizer spend', color: 'var(--series-3)', values: recentRows.map(r => r.fertSpend) }] })}
+      <div class="table-wrap" style="margin-top:10px"><table>
+        <thead><tr><th>Plucking</th><th>Coconuts</th><th>Per tree</th><th>Fertilizer (${prefs.fertLagMin}–${prefs.fertLagMax} mo before)</th><th>Pesticide (${prefs.pestLag} mo before)</th><th>Saplings treated</th></tr></thead>
+        <tbody>${table}</tbody></table></div>
+    </div>
+    <div class="card"><h3>Yearly summary</h3><div class="table-wrap"><table>
+      <thead><tr><th>Year</th><th>Pluckings</th><th>Coconuts</th><th>Sales</th><th>Plucking costs</th><th>Fertilizer</th><th>Pesticide</th><th>Net after all costs</th></tr></thead>
+      <tbody>${yearRows}</tbody></table></div></div>`;
+}
+
+function careCard(j) {
+  const st = jobStats(j);
+  const items = jobItemsOf(j.id).filter(i => i.name);
+  const planned = isPlanned(j);
+  const chip = planned
+    ? (j.date < today() ? '<span class="chip bad">Overdue</span>' : j.date <= addDays(today(), prefs.remindDays) ? `<span class="chip warn">${dueText(j)}</span>` : `<span class="chip">${dueText(j)}</span>`)
+    : `<strong class="num">${inr(st.total)}</strong>`;
+  const extra = j.kind === 'fertilizer'
+    ? `Effect expected ${fmtMonth(addMonths(j.date, prefs.fertLagMin))} – ${fmtMonth(addMonths(j.date, prefs.fertLagMax))}`
+    : j.plants ? plural(j.plants, 'sapling') + ' treated' : '';
+  return `
+    <a class="card link" href="#/care/${j.id}">
+      <div class="row spread"><strong>${KIND[j.kind].icon} ${h(jobName(j))}</strong>${chip}</div>
+      <div class="muted small">${fmtDate(j.date)}${items.length ? ' · ' + items.map(i => h(i.name) + (i.qty ? ` ${nf2.format(i.qty)} ${h(i.unit || '')}` : '')).join(', ') : ''}</div>
+      ${!planned && extra ? `<div class="muted small">${extra}</div>` : ''}
+    </a>`;
+}
+
+function viewCare() {
+  const fert = jobsOf('fertilizer').sort(byDate).reverse();
+  const pest = jobsOf('pesticide');
+  const planned = pest.filter(isPlanned).sort(byDate);
+  const done = pest.filter(j => !isPlanned(j)).sort(byDate).reverse();
+  const year = today().slice(0, 4);
+  const spend = kind => sum(jobsOf(kind).filter(j => !isPlanned(j) && String(j.date).startsWith(year)).map(j => jobStats(j).total));
+  return {
+    html: `
+      <h1>Farm care</h1>
+      ${reminderBanner()}
+      <div class="grid g2" style="margin-bottom:10px">
+        <button class="btn primary" data-action="newJob" data-kind="fertilizer">+ Fertilizing</button>
+        <button class="btn primary" data-action="newJob" data-kind="pesticide">+ Pesticide</button>
+      </div>
+      <div class="card"><div class="stats">
+        ${statTile(`Fertilizer ${year}`, inr(spend('fertilizer')))}
+        ${statTile(`Pesticide ${year}`, inr(spend('pesticide')))}
+        ${statTile('Planned rounds', planned.length)}
+      </div></div>
+
+      <div class="section-title"><h2>Pesticide schedule</h2><a class="btn sm" href="#/care/plan">📅 Plan schedule</a></div>
+      ${planned.map(careCard).join('') || '<p class="muted small">No rounds planned. Use “Plan schedule” to plan the year ahead.</p>'}
+
+      <div class="section-title"><h2>Fertilizing sessions</h2></div>
+      ${fert.map(careCard).join('') || '<p class="muted small">None recorded yet.</p>'}
+
+      <div class="section-title"><h2>Pesticide sessions done</h2></div>
+      ${done.map(careCard).join('') || '<p class="muted small">None recorded yet.</p>'}`,
+  };
+}
+
+function viewJob(id) {
+  const j = byId('jobs', id);
+  if (!j) return notFound();
+  const K = KIND[j.kind] || KIND.fertilizer;
+  const pest = j.kind === 'pesticide';
+  const planned = isPlanned(j);
+  const workers = jobWorkersOf(id), items = jobItemsOf(id), expenses = jobExpensesOf(id);
+
+  const workerRows = workers.map(w => `
+    <div class="sub">
+      <div class="row" style="margin-bottom:8px">
+        <input class="grow" type="text" list="careWorkerNames" placeholder="Worker name" aria-label="Worker name" data-t="jobWorkers" data-id="${w.id}" data-f="name" value="${h(w.name)}">
+        <button class="icon-btn" title="Remove" data-action="delJobWorker" data-id="${w.id}">✕</button>
+      </div>
+      <div class="grid g2">${dateInput('jobWorkers', w, 'date', 'Date worked')}${numInput('jobWorkers', w, 'fee', 'Fee (₹)')}</div>
+    </div>`).join('');
+
+  const itemRows = items.map(i => `
+    <div class="sub">
+      <div class="row" style="margin-bottom:8px">
+        <input class="grow" type="text" list="materialNames" placeholder="${K.material} name" aria-label="${K.material} name" data-t="jobItems" data-id="${i.id}" data-f="name" value="${h(i.name)}">
+        <button class="icon-btn" title="Remove" data-action="delJobItem" data-id="${i.id}">✕</button>
+      </div>
+      ${pest
+        ? `<div class="grid g4">${numInput('jobItems', i, 'qty', 'Quantity')}${textInput('jobItems', i, 'unit', 'Unit', 'placeholder="L / ml / kg"')}${numInput('jobItems', i, 'rate', 'Rate (₹/unit)')}${numInput('jobItems', i, 'amount', 'Amount (₹)')}</div>`
+        : `<div class="grid g2">${numInput('jobItems', i, 'qty', 'Weight (kg)')}${numInput('jobItems', i, 'amount', 'Amount (₹)')}</div>`}
+    </div>`).join('');
+
+  const expenseRows = expenses.map(x => `
+    <div class="line-row">
+      <input class="grow" type="text" placeholder="e.g. Transport, tools" aria-label="Expense" data-t="jobExpenses" data-id="${x.id}" data-f="name" value="${h(x.name)}">
+      <input class="fee" type="number" inputmode="decimal" min="0" step="any" placeholder="₹" aria-label="Amount" data-t="jobExpenses" data-id="${x.id}" data-f="amount" value="${valAttr(x.amount)}">
+      <button class="icon-btn" title="Remove" data-action="delJobExpense" data-id="${x.id}">✕</button>
+    </div>`).join('');
+
+  const canCopy = !workers.some(w => w.name) && !items.some(i => i.name) &&
+    jobsOf(j.kind).some(o => o.id !== id && (jobItemsOf(o.id).length || jobWorkersOf(o.id).length));
+
+  return {
+    html: `
+      <a class="back" href="#/care">‹ Farm care</a>
+      <div class="row spread"><h1 data-jname>${K.icon} ${h(jobName(j))}</h1>
+        ${pest ? (planned ? '<span class="chip warn">Planned</span>' : '<span class="chip good">✓ Done</span>') : ''}</div>
+      ${planned ? `<div class="banner remind">Planned for <strong>${fmtDate(j.date)}</strong> (${dueText(j)}). Mark it as done once the pesticide is applied.</div>` : ''}
+      <div class="card">
+        <div class="grid g2">
+          ${textInput('jobs', j, 'name', 'Session name')}
+          ${dateInput('jobs', j, 'date', planned ? 'Planned date' : 'Date')}
+          ${pest ? numInput('jobs', j, 'plants', 'Saplings / small trees treated', 'inputmode="numeric" step="1"') : ''}
+        </div>
+        ${!pest ? `<p class="muted small" style="margin-bottom:0">${calc('effect')}</p>` : ''}
+        ${canCopy ? `<button class="btn sm" data-action="copyLastJob" data-id="${id}" style="margin-top:10px">Copy workers & ${K.materials.toLowerCase()} from last time</button>` : ''}
+      </div>
+
+      <div class="section-title"><h2>Workers</h2><button class="btn sm" data-action="addJobWorker" data-id="${id}">+ Add worker</button></div>
+      ${workerRows || '<p class="muted small">No workers added.</p>'}
+      ${datalist('careWorkerNames', uniqueNames([...db().jobWorkers, ...db().workers, ...db().dehuskWorkers], 'name'))}
+
+      <div class="section-title"><h2>${K.materials}</h2><button class="btn sm" data-action="addJobItem" data-id="${id}">+ Add</button></div>
+      ${itemRows || '<p class="muted small">Nothing added.</p>'}
+      ${datalist('materialNames', uniqueNames(db().jobItems.filter(i => { const o = byId('jobs', i.jobId); return o && o.kind === j.kind; }), 'name'))}
+
+      <div class="section-title"><h2>Other expenses</h2><button class="btn sm" data-action="addJobExpense" data-id="${id}">+ Add</button></div>
+      ${expenseRows ? `<div class="card">${expenseRows}</div>` : '<p class="muted small">None.</p>'}
+
+      <div class="card">
+        <div class="kv"><span>Workers</span>${calc('labour')}</div>
+        <div class="kv"><span>${K.materials}</span>${calc('materials')}</div>
+        <div class="kv"><span>Other expenses</span>${calc('other')}</div>
+        <div class="kv total"><span>Total</span>${calc('total')}</div>
+      </div>
+
+      <div class="card"><label class="field">Notes<textarea data-t="jobs" data-id="${id}" data-f="notes">${h(j.notes)}</textarea></label></div>
+      ${pest ? (planned
+        ? `<button class="btn primary block" data-action="markJobDone" data-id="${id}" style="margin-bottom:10px">✓ Mark as done (applied)</button>`
+        : `<button class="btn block" data-action="markJobPlanned" data-id="${id}" style="margin-bottom:10px">Move back to planned</button>`) : ''}
+      <button class="btn danger ghost block" data-action="delJob" data-id="${id}">Delete this session</button>
+      ${saveBar()}`,
+    calc: () => {
+      const st = jobStats(j);
+      return {
+        labour: inr(st.labour), materials: inr(st.materials), other: inr(st.other), total: inr(st.total),
+        effect: `Expected to show in harvests from ${fmtMonth(addMonths(j.date, prefs.fertLagMin))} to ${fmtMonth(addMonths(j.date, prefs.fertLagMax))}.`,
+      };
+    },
+  };
+}
+
+function planDates() {
+  const v = id => ($(`#${id}`) || {}).value;
+  const start = v('planStart'), every = Math.max(1, Number(v('planEvery')) || 1), unit = v('planUnit'), rounds = Math.min(60, Math.max(1, Number(v('planRounds')) || 1));
+  if (!start) return [];
+  return Array.from({ length: rounds }, (_, i) => (unit === 'days' ? addDays(start, i * every) : addMonths(start, i * every)));
+}
+function updatePlanPreview() {
+  const el = $('#planPreview');
+  if (!el) return;
+  const dates = planDates();
+  const prefix = ($('#planName') || {}).value || 'Pesticide round';
+  const n = jobsOf('pesticide').length;
+  el.innerHTML = dates.length
+    ? `<div class="muted small" style="margin-bottom:6px">${plural(dates.length, 'round')} until ${fmtDate(dates[dates.length - 1])}</div>` +
+      dates.map((d, i) => `<div class="kv small"><span>${h(prefix)} ${n + i + 1}</span><span>${fmtDate(d)}</span></div>`).join('')
+    : '<p class="muted small">Choose a start date.</p>';
+}
+
+function viewPlan() {
+  const pest = jobsOf('pesticide').sort(byDate);
+  const planned = pest.filter(isPlanned);
+  const lastDate = pest.length ? pest[pest.length - 1].date : '';
+  const start = lastDate && lastDate >= today() ? addMonths(lastDate, 2) : today();
+  return {
+    html: `
+      <a class="back" href="#/care">‹ Farm care</a>
+      <h1>Plan pesticide schedule</h1>
+      <div class="card">
+        <div class="grid g2">
+          <label class="field">First round<input id="planStart" type="date" value="${start}"></label>
+          <label class="field">Name<input id="planName" type="text" value="Pesticide round"></label>
+          <label class="field">Repeat every<input id="planEvery" type="number" inputmode="numeric" min="1" value="2"></label>
+          <label class="field">Unit<select id="planUnit"><option value="months" selected>Months</option><option value="days">Days</option></select></label>
+          <label class="field">Number of rounds<input id="planRounds" type="number" inputmode="numeric" min="1" max="60" value="6"></label>
+        </div>
+        <div id="planPreview" style="margin-top:12px"></div>
+        <button class="btn primary block" data-action="createPlan" style="margin-top:12px">Add these rounds to the schedule</button>
+        <p class="muted small" style="margin-bottom:0">You'll be reminded from ${prefs.remindDays} days before each round, in the app and by email.</p>
+      </div>
+      ${planned.length ? `
+        <div class="section-title"><h2>Already planned</h2><button class="btn sm danger" data-action="clearPlanned">Remove all planned</button></div>
+        ${planned.map(careCard).join('')}` : ''}`,
+    after: updatePlanPreview,
   };
 }
 
@@ -1077,6 +1400,78 @@ const actions = {
     deleteSession(id);
     location.hash = '#/';
   },
+  newJob({ kind }) {
+    const date = today();
+    const j = { id: uid(), kind, name: `${KIND[kind].label} ${fmtMonth(date)}`, date, status: kind === 'pesticide' ? 'done' : '', plants: 0, notes: '' };
+    put('jobs', j);
+    put('jobWorkers', { id: uid(), jobId: j.id, name: '', date, fee: 0, sortOrder: 1 });
+    put('jobItems', { id: uid(), jobId: j.id, name: '', qty: 0, unit: kind === 'fertilizer' ? 'kg' : '', rate: 0, amount: 0, sortOrder: 1 });
+    location.hash = `#/care/${j.id}`;
+  },
+  addJobWorker({ id }) {
+    const ws = jobWorkersOf(id);
+    const w = { id: uid(), jobId: id, name: '', date: ws.length ? ws[ws.length - 1].date : byId('jobs', id).date, fee: 0, sortOrder: nextSortOrder(ws) };
+    put('jobWorkers', w);
+    render({ keepScroll: true, focusId: w.id, focusField: 'name' });
+  },
+  addJobItem({ id }) {
+    const j = byId('jobs', id);
+    const it = { id: uid(), jobId: id, name: '', qty: 0, unit: j.kind === 'fertilizer' ? 'kg' : '', rate: 0, amount: 0, sortOrder: nextSortOrder(jobItemsOf(id)) };
+    put('jobItems', it);
+    render({ keepScroll: true, focusId: it.id, focusField: 'name' });
+  },
+  addJobExpense({ id }) {
+    const x = { id: uid(), jobId: id, name: '', amount: 0, sortOrder: nextSortOrder(jobExpensesOf(id)) };
+    put('jobExpenses', x);
+    render({ keepScroll: true, focusId: x.id, focusField: 'name' });
+  },
+  delJobWorker({ id }) { del('jobWorkers', id); render({ keepScroll: true }); },
+  delJobItem({ id }) { del('jobItems', id); render({ keepScroll: true }); },
+  delJobExpense({ id }) { del('jobExpenses', id); render({ keepScroll: true }); },
+  copyLastJob({ id }) {
+    const j = byId('jobs', id);
+    const last = jobsOf(j.kind).filter(o => o.id !== id && (jobItemsOf(o.id).length || jobWorkersOf(o.id).length) && !isPlanned(o)).sort(byDate).pop()
+      || jobsOf(j.kind).filter(o => o.id !== id && (jobItemsOf(o.id).length || jobWorkersOf(o.id).length)).sort(byDate).pop();
+    if (!last) return;
+    // Replace the empty starter rows with last time's people and materials (prices kept as a starting point).
+    jobWorkersOf(id).filter(w => !w.name && !w.fee).forEach(w => del('jobWorkers', w.id));
+    jobItemsOf(id).filter(i => !i.name && !i.amount).forEach(i => del('jobItems', i.id));
+    jobWorkersOf(last.id).forEach((w, n) => put('jobWorkers', { id: uid(), jobId: id, name: w.name, date: j.date, fee: w.fee, sortOrder: n + 1 }));
+    jobItemsOf(last.id).forEach((i, n) => put('jobItems', { id: uid(), jobId: id, name: i.name, qty: i.qty, unit: i.unit, rate: i.rate, amount: i.amount, sortOrder: n + 1 }));
+    if (j.kind === 'pesticide' && !j.plants && last.plants) patch('jobs', j, { plants: last.plants });
+    toast(`Copied from ${jobName(last)}. Check the amounts.`);
+    render({ keepScroll: true });
+  },
+  markJobDone({ id }) {
+    const j = byId('jobs', id);
+    patch('jobs', j, { status: 'done', date: j.date > today() ? today() : j.date });
+    actions.saveNow();
+    render({ keepScroll: true });
+  },
+  markJobPlanned({ id }) {
+    patch('jobs', byId('jobs', id), { status: 'planned' });
+    render({ keepScroll: true });
+  },
+  delJob({ id }) {
+    if (!confirm('Delete this session with its workers, materials and expenses?')) return;
+    deleteJob(id);
+    location.hash = '#/care';
+  },
+  createPlan() {
+    const dates = planDates();
+    if (!dates.length) return toast('Choose a start date');
+    const prefix = ($('#planName').value || 'Pesticide round').trim();
+    const n = jobsOf('pesticide').length;
+    dates.forEach((date, i) => put('jobs', { id: uid(), kind: 'pesticide', name: `${prefix} ${n + i + 1}`, date, status: 'planned', plants: 0, notes: '' }));
+    toast(`${plural(dates.length, 'round')} added to the schedule`);
+    location.hash = '#/care';
+  },
+  clearPlanned() {
+    const planned = jobsOf('pesticide').filter(isPlanned);
+    if (!confirm(`Remove all ${planned.length} planned rounds? Rounds already done are kept.`)) return;
+    planned.forEach(j => deleteJob(j.id));
+    render({ keepScroll: true });
+  },
   async saveNow() {
     saveLocal();
     if (!configured()) return toast('Saved on this device');
@@ -1122,6 +1517,7 @@ function onFieldInput(el) {
   const rec = byId(t, id);
   if (!rec) return;
   const isNum = (SCHEMA[t].num || []).includes(f);
+  const prevVal = rec[f];
   rec[f] = isNum ? (el.value === '' ? 0 : Number(el.value) || 0) : el.value;
   if (t === 'saleItems' && (f === 'kg' || f === 'rate')) {
     rec.total = round2(rec.kg * rec.rate);
@@ -1134,6 +1530,20 @@ function onFieldInput(el) {
   if (t === 'workers' && f === 'name') $$(`[data-wname="${id}"]`).forEach(n => { if (n !== el) n.textContent = workerName(rec); });
   if (t === 'workers') refreshDerived(rec.sessionId);
   if (t === 'dehuskWorkers') { const d = byId('dehusking', rec.dehuskId); if (d) patch('dehusking', d, { fee: dehuskFeeOf(d) }); }
+  if (t === 'jobItems' && (f === 'qty' || f === 'rate') && rec.rate > 0) {
+    patch('jobItems', rec, { amount: round2(rec.qty * rec.rate) });
+    const ai = $(`[data-t="jobItems"][data-id="${id}"][data-f="amount"]`);
+    if (ai) ai.value = rec.amount || '';
+  }
+  if (t === 'jobs' && f === 'date') {
+    // Workers still on the session's old date move with it.
+    jobWorkersOf(id).filter(w => w.date === prevVal).forEach(w => {
+      patch('jobWorkers', w, { date: rec.date });
+      const di = $(`[data-t="jobWorkers"][data-id="${w.id}"][data-f="date"]`);
+      if (di) di.value = rec.date;
+    });
+  }
+  if (t === 'jobs' && (f === 'name' || f === 'date')) $$('[data-jname]').forEach(n => { n.textContent = `${KIND[rec.kind].icon} ${jobName(rec)}`; });
   if (t === 'workers' && f === 'type') return render({ keepScroll: true });
   refreshCalcs();
 }
@@ -1147,6 +1557,9 @@ const routes = [
   [/^#\/dues$/, viewDues, 'dues'],
   [/^#\/analytics$/, viewAnalytics, 'analytics'],
   [/^#\/settings$/, viewSettings, 'settings'],
+  [/^#\/care\/?$/, viewCare, 'care'],
+  [/^#\/care\/plan$/, viewPlan, 'care'],
+  [/^#\/care\/([\w-]+)$/, viewJob, 'care'],
 ];
 let currentView = null;
 let pendingRender = false;
@@ -1177,6 +1590,7 @@ function renderPage(hash, { keepScroll, focusId, focusField }) {
   currentView = view;
   refreshCalcs();
   updateSyncUI();
+  if (view.after) view.after();
   $$('.tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
   window.scrollTo(0, keepScroll ? y : 0);
   if (focusId) {
@@ -1278,6 +1692,14 @@ function init() {
     updateSyncUI();
   });
   app.addEventListener('change', e => { if (e.target.id === 'cfgUrl' || e.target.id === 'cfgToken') sync(); });
+  app.addEventListener('input', e => {
+    const id = e.target.id || '';
+    if (id.startsWith('plan')) updatePlanPreview();
+    if (id.startsWith('pref')) {
+      const key = id[4].toLowerCase() + id.slice(5);
+      if (key in prefs) { prefs[key] = Math.max(0, Number(e.target.value) || 0); saveJSON('cp.prefs', prefs); }
+    }
+  });
   app.addEventListener('focusout', () => {
     setTimeout(() => { if (pendingRender && !isEditing()) { pendingRender = false; render({ keepScroll: true }); } }, 0);
   });

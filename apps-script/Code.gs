@@ -4,7 +4,13 @@
  * Paste this file into Extensions → Apps Script of your Google Sheet,
  * run `setup` once, then Deploy → New deployment → Web app
  * (Execute as: Me, Who has access: Anyone). See README.md.
+ *
+ * `setup` also installs a daily trigger that emails you about planned
+ * pesticide rounds from REMIND_DAYS_BEFORE days before they are due.
  */
+
+const REMIND_DAYS_BEFORE = 14;
+const REMIND_OVERDUE_DAYS = 7; // keep reminding this long after a missed date
 
 // Client table key → sheet name + columns. Column order in the sheet doesn't
 // matter after creation: reads and writes are mapped by the header row.
@@ -18,27 +24,20 @@ const TABLES = {
   dehuskWorkers: { sheet: 'DehuskWorkers',    cols: ['id', 'dehuskId', 'name', 'fee', 'sortOrder', 'updatedAt'] },
   sales:         { sheet: 'SalesSessions',    cols: ['id', 'sessionId', 'date', 'notes', 'updatedAt'] },
   saleItems:     { sheet: 'SaleItems',        cols: ['id', 'saleId', 'customer', 'kg', 'rate', 'total', 'paid', 'sortOrder', 'updatedAt'] },
+  // Farm care: fertilizing and pesticide sessions (kind = 'fertilizer' | 'pesticide').
+  jobs:          { sheet: 'CareSessions',     cols: ['id', 'kind', 'name', 'date', 'status', 'plants', 'notes', 'updatedAt'] },
+  jobWorkers:    { sheet: 'CareWorkers',      cols: ['id', 'jobId', 'name', 'date', 'fee', 'sortOrder', 'updatedAt'] },
+  jobItems:      { sheet: 'CareMaterials',    cols: ['id', 'jobId', 'name', 'qty', 'unit', 'rate', 'amount', 'sortOrder', 'updatedAt'] },
+  jobExpenses:   { sheet: 'CareOtherExpenses', cols: ['id', 'jobId', 'name', 'amount', 'sortOrder', 'updatedAt'] },
 };
 
 // Stored as plain text so Sheets doesn't turn dates/IDs/names into other types.
-const TEXT_COLS = ['id', 'sessionId', 'saleId', 'plotId', 'workerId', 'dehuskId', 'date', 'status', 'name', 'type', 'customer', 'notes'];
+const TEXT_COLS = ['id', 'sessionId', 'saleId', 'plotId', 'workerId', 'dehuskId', 'jobId', 'kind', 'unit', 'date', 'status', 'name', 'type', 'customer', 'notes'];
 
 /** Run once from the Apps Script editor. Creates sheets and the API token. */
 function setup() {
   const ss = SpreadsheetApp.getActive();
-  Object.keys(TABLES).forEach(function (key) {
-    const t = TABLES[key];
-    const sh = ss.getSheetByName(t.sheet) || ss.insertSheet(t.sheet);
-    const existing = sh.getLastColumn() > 0
-      ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].filter(String)
-      : [];
-    const header = existing.concat(t.cols.filter(function (c) { return existing.indexOf(c) < 0; }));
-    sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
-    sh.setFrozenRows(1);
-    header.forEach(function (c, i) {
-      if (TEXT_COLS.indexOf(c) >= 0) sh.getRange(2, i + 1, sh.getMaxRows() - 1, 1).setNumberFormat('@');
-    });
-  });
+  Object.keys(TABLES).forEach(ensureSheet_);
   const blank = ss.getSheetByName('Sheet1');
   if (blank && blank.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(blank);
 
@@ -48,7 +47,62 @@ function setup() {
     token = Utilities.getUuid();
     props.setProperty('API_TOKEN', token);
   }
+  setupReminders();
   Logger.log('API token (enter this in the app Settings): ' + token);
+}
+
+/** Creates the sheet if missing and adds any missing header columns (keeps existing data). */
+function ensureSheet_(key) {
+  const t = TABLES[key];
+  if (!t) throw new Error('Unknown table: ' + key);
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(t.sheet) || ss.insertSheet(t.sheet);
+  const existing = sh.getLastColumn() > 0
+    ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].filter(String)
+    : [];
+  const missing = t.cols.filter(function (c) { return existing.indexOf(c) < 0; });
+  if (missing.length) {
+    const header = existing.concat(missing);
+    sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    header.forEach(function (c, i) {
+      if (TEXT_COLS.indexOf(c) >= 0 && existing.indexOf(c) < 0) sh.getRange(2, i + 1, sh.getMaxRows() - 1, 1).setNumberFormat('@');
+    });
+  }
+  return sh;
+}
+
+/** Installs (or reinstalls) the daily reminder trigger. Run from the editor if needed. */
+function setupReminders() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'sendReminders'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('sendReminders').timeBased().everyDays(1).atHour(7).create();
+}
+
+/** Daily: emails a digest of planned pesticide rounds that are due soon or overdue. */
+function sendReminders() {
+  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  const todayStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  const dayMs = 86400000;
+  const due = readAll_().jobs
+    .filter(function (j) { return j.kind === 'pesticide' && j.status === 'planned' && j.date; })
+    .map(function (j) {
+      const days = Math.round((new Date(j.date + 'T00:00:00') - new Date(todayStr + 'T00:00:00')) / dayMs);
+      return { name: j.name || 'Pesticide round', date: j.date, days: days };
+    })
+    .filter(function (j) { return j.days <= REMIND_DAYS_BEFORE && j.days >= -REMIND_OVERDUE_DAYS; })
+    .sort(function (a, b) { return a.days - b.days; });
+  if (!due.length) return;
+
+  const lines = due.map(function (j) {
+    const when = j.days < 0 ? 'OVERDUE by ' + (-j.days) + ' day(s)' : j.days === 0 ? 'due TODAY' : 'due in ' + j.days + ' day(s)';
+    return '• ' + j.name + ' – ' + j.date + ' (' + when + ')';
+  });
+  const to = PropertiesService.getScriptProperties().getProperty('REMINDER_EMAIL') || Session.getEffectiveUser().getEmail();
+  MailApp.sendEmail(to, 'Coconut farm: pesticide reminder (' + due.length + ')',
+    'Planned pesticide rounds:\n\n' + lines.join('\n') +
+    '\n\nOpen the Coconut Plucking app and mark the round as done once applied.');
 }
 
 function doGet(e) {
@@ -90,11 +144,7 @@ function checkToken_(token) {
 }
 
 function sheetFor_(key) {
-  const t = TABLES[key];
-  if (!t) throw new Error('Unknown table: ' + key);
-  const sh = SpreadsheetApp.getActive().getSheetByName(t.sheet);
-  if (!sh) throw new Error('Missing sheet ' + t.sheet + '. Run setup().');
-  return sh;
+  return ensureSheet_(key);
 }
 
 function readAll_() {
