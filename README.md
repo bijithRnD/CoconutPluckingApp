@@ -5,13 +5,14 @@ An installable, offline-first web app for tracking coconut plucking, dehusking a
 - **Home**: shows the plucking session in progress, a button to start a new one, and all recently completed sessions.
 - **Plucking session** (each one has a name, which defaults to the month, e.g. "October 2026 plucking", and you can change it):
   - **Workers**: each has a name and a type, *Climber* or *Collector*. A new session starts with the crew from the last session, so you only need to remove anyone who didn't come.
-  - **Plots**: there is one by default and you can add as many as you need. Every plot uses the session's workers. Each climber has a **+1 counter**: tap it once per tree climbed. The plot's tree count is the total of these taps. You enter the coconut count by hand.
+  - **Plots**: there is one by default and you can add as many as you need. Every plot uses the session's workers. To count trees, tap **Count trees climbed** in a plot. A full-screen counter opens with a large **+1** button for each climber, a smaller **−** to undo a tap, and tabs to switch between plots. It keeps the screen awake while it's open. The plot's tree count is the total of these taps. You enter the coconut count by hand.
+  - **Coconuts taken by climbers**: for each plot, enter how many coconuts the climbers took and the rate per coconut. The rate is copied from the last one you entered. These coconuts are taken off the coconuts for sale, and their value (coconuts × rate) counts as an expense.
   - **Transport per plot**: the vehicle or driver name and the fee. You can add more than one vehicle.
   - **Workers fee**: each worker has their own fee. **Apply to climbers** sets each climber's fee to trees climbed × the rate per tree.
   - **Mark plucking as completed** moves the session to the "Recently completed" list. You can reopen it later.
 - **Dehusking**: date, number of coconuts, and each worker's name and fee.
 - **Sales session**: customers with KG, rate and total (total = KG × rate, and you can edit it). Mark each customer's payment as received or not.
-- **Saving**: every change saves automatically. A **Save** button on each edit page saves straight away and shows whether everything has reached Google Sheets.
+- **Saving**: every change is saved on the device straight away and sent to Google Sheets automatically whenever there's a network connection. Unsent changes are retried every 30 seconds and whenever the phone comes back online. The Web app URL and API token are saved as you type them. A **Save** button on each edit page saves straight away and shows whether everything has reached Google Sheets.
 - **Dues**: every unpaid amount, grouped by customer.
 - **Analytics**: compares the latest plucking with the previous one, including workers' fees, transport and dehusking. It also shows trends across sessions, plus tables for each plot, each worker (trees climbed, ₹ per tree, total paid) and each customer.
 

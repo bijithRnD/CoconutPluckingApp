@@ -5,7 +5,7 @@
 const SCHEMA = {
   sessions:      { num: ['workers', 'workerFee', 'climberRate', 'updatedAt'] },
   workers:       { num: ['fee', 'sortOrder', 'updatedAt'] },
-  plots:         { num: ['workers', 'trees', 'coconuts', 'sortOrder', 'updatedAt'] },
+  plots:         { num: ['workers', 'trees', 'coconuts', 'nutsTaken', 'nutRate', 'sortOrder', 'updatedAt'] },
   plotTrees:     { num: ['trees', 'updatedAt'] },
   transport:     { num: ['fee', 'sortOrder', 'updatedAt'] },
   dehusking:     { num: ['coconuts', 'fee', 'updatedAt'] },
@@ -124,6 +124,7 @@ const isActive = s => s.status === 'active';
 
 // Derived totals: computed from detail rows when present, else the stored value (older data).
 const plotTreeTotal = p => { const r = treeRecsOfPlot(p.id); return r.length ? sum(r, 'trees') : (p.trees || 0); };
+const nutsValue = p => (p.nutsTaken || 0) * (p.nutRate || 0);
 const dehuskFeeOf = d => { const w = dehuskWorkersOf(d.id); return w.length ? sum(w, 'fee') : (d.fee || 0); };
 const sessionWorkerFee = s => { const w = workersOf(s.id); return w.length ? sum(w, 'fee') : (s.workerFee || 0); };
 
@@ -169,6 +170,8 @@ function stats(s) {
   const ws = workersOf(s.id);
   const trees = sum(plots.map(plotTreeTotal));
   const coconuts = sum(plots, 'coconuts');
+  const nutsTaken = sum(plots, 'nutsTaken');
+  const nutsTakenValue = sum(plots.map(nutsValue));
   const workerFee = sessionWorkerFee(s);
   const transportFee = sum(plots.flatMap(p => transportOf(p.id)), 'fee');
   const dh = dehuskOf(s.id);
@@ -178,9 +181,10 @@ function stats(s) {
   const kg = sum(items, 'kg');
   const revenue = sum(items, 'total');
   const received = sum(items.filter(i => i.paid), 'total');
-  const cost = workerFee + transportFee + dehuskFee;
+  const cost = workerFee + transportFee + dehuskFee + nutsTakenValue;
   return {
-    s, plots, trees, coconuts, workerFee, transportFee, dehuskFee,
+    s, plots, trees, coconuts, nutsTaken, nutsTakenValue, saleNuts: Math.max(0, coconuts - nutsTaken),
+    workerFee, transportFee, dehuskFee,
     workers: ws.length || s.workers || 0,
     climbers: ws.filter(w => w.type === 'climber').length,
     collectors: ws.filter(w => w.type !== 'climber').length,
@@ -189,7 +193,7 @@ function stats(s) {
     kg, revenue, received, pending: revenue - received, cost, net: revenue - cost,
     perTree: trees ? coconuts / trees : null,
     rate: kg ? revenue / kg : null,
-    kgPerNut: coconuts && kg ? kg / coconuts : null,
+    kgPerNut: coconuts - nutsTaken > 0 && kg ? kg / (coconuts - nutsTaken) : null,
     costPerNut: coconuts ? cost / coconuts : null,
   };
 }
@@ -274,8 +278,7 @@ function updateSyncUI() {
   btn.dataset.state = state;
   $('#syncText').textContent = text;
   btn.title = store.syncError || 'Sync now';
-  const sb = $('#saveState');
-  if (sb) { sb.textContent = save; sb.dataset.state = state; }
+  $$('#saveState, [data-save]').forEach(sb => { sb.textContent = save; sb.dataset.state = state; });
   if ($('[data-calc="syncInfo"]')) refreshCalcs();
 }
 
@@ -498,13 +501,9 @@ function viewSession(id) {
 
   const plotCards = plots.map((p, i) => {
     const hasTreeRecs = treeRecsOfPlot(p.id).length > 0;
-    const counters = climbers.length ? climbers.map(w => `
-      <div class="counter-row">
-        <span class="grow cname" data-wname="${w.id}">${workerLabel(w)}</span>
-        <button class="cbtn minus" data-action="treeDec" data-plot="${p.id}" data-worker="${w.id}" aria-label="Remove one tree">−</button>
-        <span class="count" data-count="${treeId(p.id, w.id)}">${treesOf(p.id, w.id)}</span>
-        <button class="cbtn plus" data-action="treeInc" data-plot="${p.id}" data-worker="${w.id}" aria-label="Add one tree">+1</button>
-      </div>`).join('')
+    const counters = climbers.length ? `
+      <div class="tree-summary">${climbers.map(w => `<span><span data-wname="${w.id}">${workerLabel(w)}</span> <strong data-count="${treeId(p.id, w.id)}">${treesOf(p.id, w.id)}</strong></span>`).join('')}</div>
+      <button class="btn primary block count-btn" data-action="openCounter" data-id="${p.id}">🌴 Count trees climbed</button>`
       : hasTreeRecs ? '' : `<div class="grid g2">${numInput('plots', p, 'trees', 'Trees plucked', 'inputmode="numeric" step="1"')}</div>
          <p class="muted small">Add climbers above to count trees per climber.</p>`;
     return `
@@ -518,8 +517,15 @@ function viewSession(id) {
       ${collectors.length ? `<p class="small muted" style="margin:8px 0 0">Collectors: ${collectors.map(w => `<span data-wname="${w.id}">${workerLabel(w)}</span>`).join(', ')}</p>` : ''}
       <div class="grid g2" style="margin-top:12px">
         <div class="stat"><div class="k">Trees in this plot</div><div class="v">${calc('plotTrees_' + p.id)}</div></div>
-        ${numInput('plots', p, 'coconuts', 'Coconuts', 'inputmode="numeric" step="1"')}
+        ${numInput('plots', p, 'coconuts', 'Coconuts plucked', 'inputmode="numeric" step="1"')}
       </div>
+      <h3 style="margin-top:14px">Coconuts taken by climbers</h3>
+      <div class="grid g3">
+        ${numInput('plots', p, 'nutsTaken', 'Coconuts', 'inputmode="numeric" step="1"')}
+        ${numInput('plots', p, 'nutRate', 'Rate (₹/coconut)')}
+        <div class="stat"><div class="k">Expense</div><div class="v">${calc('nutsVal_' + p.id)}</div></div>
+      </div>
+      <p class="small muted" style="margin:6px 0 0">Coconuts left for sale from this plot: <strong>${calc('forSale_' + p.id)}</strong></p>
       <h3 style="margin-top:14px">Transport</h3>
       ${transportOf(p.id).map(t => nameFeeRow('transport', t, { list: 'transportNames', placeholder: 'Vehicle / driver', delAction: 'delTransport' })).join('')}
       <button class="btn sm ghost" data-action="addTransport" data-id="${p.id}">+ Add vehicle</button>
@@ -582,7 +588,9 @@ function viewSession(id) {
       <div class="card">
         <div class="stats">
           ${statTile('Total trees', calc('trees'))}
-          ${statTile('Total coconuts', calc('coconuts'))}
+          ${statTile('Coconuts plucked', calc('coconuts'))}
+          ${statTile('Taken by climbers', calc('nutsTaken'))}
+          ${statTile('For sale', calc('saleNuts'))}
           ${statTile('Coconuts / tree', calc('perTree'))}
         </div>
       </div>
@@ -609,6 +617,7 @@ function viewSession(id) {
       <div class="card">
         <div class="kv"><span>Workers fee</span>${calc('workerFee')}</div>
         <div class="kv"><span>Transport</span>${calc('transportFee')}</div>
+        <div class="kv"><span>Coconuts given to climbers</span>${calc('nutsTakenValue')}</div>
         <div class="kv"><span>Dehusking fee</span>${calc('dehuskFee')}</div>
         <div class="kv"><span>Total cost</span>${calc('cost')}</div>
         <div class="kv"><span>Sales</span>${calc('revenue')}</div>
@@ -627,11 +636,16 @@ function viewSession(id) {
       const st = stats(s);
       const out = {
         workerCounts: `${plural(st.climbers, 'climber')} · ${plural(st.collectors, 'collector')}`,
-        trees: num(st.trees), coconuts: num(st.coconuts), perTree: dash(st.perTree, nf1.format),
+        trees: num(st.trees), coconuts: num(st.coconuts), nutsTaken: num(st.nutsTaken), saleNuts: num(st.saleNuts), perTree: dash(st.perTree, nf1.format),
+        nutsTakenValue: st.nutsTaken ? `${inr(st.nutsTakenValue)} (${num(st.nutsTaken)} coconuts)` : inr(0),
         workerFee: inr(st.workerFee), transportFee: inr(st.transportFee), dehuskFee: inr(st.dehuskFee), cost: inr(st.cost),
         revenue: inr(st.revenue), received: inr(st.received), pending: inr(st.pending), net: inr(st.net),
       };
-      st.plots.forEach(p => { out['plotTrees_' + p.id] = num(plotTreeTotal(p)); });
+      st.plots.forEach(p => {
+        out['plotTrees_' + p.id] = num(plotTreeTotal(p));
+        out['nutsVal_' + p.id] = inr(nutsValue(p));
+        out['forSale_' + p.id] = num(Math.max(0, (p.coconuts || 0) - (p.nutsTaken || 0)));
+      });
       workersOf(id).forEach(w => { out['wTrees_' + w.id] = num(workerTrees(w.id)); });
       dehuskOf(id).forEach(d => { out['dhFee_' + d.id] = inr(dehuskFeeOf(d)); });
       return out;
@@ -743,6 +757,7 @@ function viewAnalytics() {
   const tiles = [
     statTile('Coconuts', num(last.coconuts), delta(last.coconuts, P.coconuts)),
     statTile('Coconuts / tree', dash(last.perTree, nf1.format), delta(last.perTree, P.perTree)),
+    statTile('Coconuts to climbers', `${num(last.nutsTaken)} · ${inr(last.nutsTakenValue)}`, delta(last.nutsTakenValue, P.nutsTakenValue)),
     statTile('Sales', inr(last.revenue), delta(last.revenue, P.revenue)),
     statTile('Workers fee', inr(last.workerFee), delta(last.workerFee, P.workerFee)),
     statTile('Transport', inr(last.transportFee), delta(last.transportFee, P.transportFee)),
@@ -793,7 +808,7 @@ function viewAnalytics() {
     return `<tr>
       <td><a href="#/session/${x.s.id}">${h(sessionName(x.s))}</a><div class="muted small">${fmtDate(x.s.date)}</div></td>
       <td>${before ? daysBetween(before.s.date, x.s.date) : '—'}</td>
-      <td>${num(x.climbers)} / ${num(x.collectors)}</td><td>${num(x.trees)}</td><td>${num(x.coconuts)}</td>
+      <td>${num(x.climbers)} / ${num(x.collectors)}</td><td>${num(x.trees)}</td><td>${num(x.coconuts)}</td><td>${x.nutsTaken ? `${num(x.nutsTaken)} · ${inr(x.nutsTakenValue)}` : '—'}</td><td>${num(x.saleNuts)}</td>
       <td>${dash(x.perTree, nf1.format)}</td><td>${nf2.format(x.kg)}</td><td>${dash(x.rate, inr2)}</td>
       <td>${inr(x.revenue)}</td><td>${inr(x.workerFee)}</td><td>${inr(x.transportFee)}</td><td>${inr(x.dehuskFee)}</td>
       <td>${inr(x.net)}</td><td>${x.pending ? inr(x.pending) : '—'}</td>
@@ -823,11 +838,11 @@ function viewAnalytics() {
       <div class="card"><h3>Coconuts per tree</h3>${lineChart({ labels, titles, name: 'Coconuts / tree', values: recent.map(x => x.perTree), fmt: nf1.format, color: 'var(--series-1)' })}</div>
       <div class="card"><h3>Sales vs cost</h3>${barChart({ labels, titles, money: true, fmt: inr, series: [
         { name: 'Sales', color: 'var(--series-1)', values: recent.map(x => x.revenue) },
-        { name: 'Cost (workers + transport + dehusking)', color: 'var(--series-2)', values: recent.map(x => x.cost) },
+        { name: 'Total cost', color: 'var(--series-2)', values: recent.map(x => x.cost) },
       ] })}</div>
       <div class="card"><h3>Average rate (₹/kg)</h3>${lineChart({ labels, titles, name: 'Rate', values: recent.map(x => x.rate), fmt: v => '₹' + nf1.format(v), color: 'var(--series-1)' })}</div>
       <div class="card"><h3>All sessions</h3><div class="table-wrap"><table>
-        <thead><tr><th>Session</th><th>Gap (d)</th><th>Climbers / collectors</th><th>Trees</th><th>Coconuts</th><th>Per tree</th><th>KG sold</th><th>₹/kg</th><th>Sales</th><th>Workers fee</th><th>Transport</th><th>Dehusk fee</th><th>Net</th><th>Pending</th></tr></thead>
+        <thead><tr><th>Session</th><th>Gap (d)</th><th>Climbers / collectors</th><th>Trees</th><th>Coconuts</th><th>To climbers</th><th>For sale</th><th>Per tree</th><th>KG sold</th><th>₹/kg</th><th>Sales</th><th>Workers fee</th><th>Transport</th><th>Dehusk fee</th><th>Net</th><th>Pending</th></tr></thead>
         <tbody>${tableRows}</tbody></table></div></div>
       ${plotNames.length ? `<div class="card"><h3>Plots across sessions (coconuts)</h3><div class="table-wrap"><table>
         <thead><tr><th>Plot</th>${cols.map(c => `<th>${fmtShortDate(c.s.date)}</th>`).join('')}</tr></thead>
@@ -852,8 +867,9 @@ function viewSettings() {
           <label class="field">Web app URL<input id="cfgUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" value="${h(store.config.url)}"></label>
           <label class="field">API token<input id="cfgToken" type="text" autocomplete="off" value="${h(store.config.token)}"></label>
         </div>
+        <p class="small muted" style="margin:8px 0 0">Saved on this device automatically as you type.</p>
         <div class="row" style="margin-top:12px">
-          <button class="btn primary" data-action="saveSettings">Save & connect</button>
+          <button class="btn primary" data-action="saveSettings">Test connection</button>
           <button class="btn" data-action="syncNow">Sync now</button>
         </div>
         <p class="small muted" style="margin-top:10px">${calc('syncInfo')}</p>
@@ -886,8 +902,15 @@ function lastTransportName(plotName) {
   const t = (pool.length ? pool : db().transport.filter(x => x.name)).sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)).pop();
   return t ? t.name : '';
 }
+// The most recent coconut rate entered for the climbers' share, by session date then plot order.
+function lastNutRate() {
+  const sessions = new Map(db().sessions.map(s => [s.id, s]));
+  const rated = db().plots.filter(p => p.nutRate > 0)
+    .sort((a, b) => byDate(sessions.get(a.sessionId) || {}, sessions.get(b.sessionId) || {}) || bySort(a, b));
+  return rated.length ? rated[rated.length - 1].nutRate : 0;
+}
 function addPlotRecord(sid, name, sortOrder) {
-  const p = { id: uid(), sessionId: sid, name, workers: workersOf(sid).length, trees: 0, coconuts: 0, sortOrder };
+  const p = { id: uid(), sessionId: sid, name, workers: workersOf(sid).length, trees: 0, coconuts: 0, nutsTaken: 0, nutRate: lastNutRate(), sortOrder };
   put('plots', p);
   put('transport', { id: uid(), plotId: p.id, name: lastTransportName(name), fee: 0, sortOrder: 1 });
   return p;
@@ -899,8 +922,7 @@ function setTrees(pid, wid, delta) {
   put('plotTrees', rec);
   const p = byId('plots', pid);
   patch('plots', p, { trees: plotTreeTotal(p) });
-  const el = $(`[data-count="${id}"]`);
-  if (el) { el.textContent = rec.trees; el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
+  $$(`[data-count="${id}"]`).forEach(el => { el.textContent = rec.trees; el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); });
   if (delta > 0 && navigator.vibrate) navigator.vibrate(15);
   refreshCalcs();
 }
@@ -933,6 +955,13 @@ const actions = {
     deleteWorker(id);
     refreshDerived(w.sessionId);
     render({ keepScroll: true });
+  },
+  openCounter({ id }) {
+    counterFromApp = true;
+    location.hash = `#/session/${byId('plots', id).sessionId}/count/${id}`;
+  },
+  closeCounter({ id }) {
+    if (counterFromApp) { counterFromApp = false; history.back(); } else location.replace(`#/session/${id}`);
   },
   treeInc({ plot, worker }) { setTrees(plot, worker, 1); },
   treeDec({ plot, worker }) { setTrees(plot, worker, -1); },
@@ -968,7 +997,7 @@ const actions = {
   },
   addDehusk({ id }) {
     const st = stats(byId('sessions', id));
-    const d = { id: uid(), sessionId: id, date: today(), coconuts: Math.max(0, st.coconuts - st.dehuskCoconuts), fee: 0, notes: '' };
+    const d = { id: uid(), sessionId: id, date: today(), coconuts: Math.max(0, st.saleNuts - st.dehuskCoconuts), fee: 0, notes: '' };
     put('dehusking', d);
     // Start with the people from the most recent dehusking.
     const lastD = db().dehusking.filter(x => x.id !== d.id && dehuskWorkersOf(x.id).length).sort(byDate).pop();
@@ -1061,7 +1090,7 @@ const actions = {
     if (!configured()) { updateSyncUI(); return toast('Settings saved'); }
     toast('Connecting…');
     await sync();
-    toast(store.syncState === 'ok' ? 'Connected to Google Sheets' : `Could not connect: ${store.syncError}`);
+    toast(store.syncState === 'ok' ? 'Connected · data is syncing to Google Sheets' : `Could not connect: ${store.syncError}`);
   },
   async syncNow() {
     if (!configured()) return toast('Connect Google Sheets first');
@@ -1122,8 +1151,21 @@ const routes = [
 let currentView = null;
 let pendingRender = false;
 
-function render({ keepScroll = false, focusId = null, focusField = null } = {}) {
+const COUNT_ROUTE = /^(#\/session\/[\w-]+)\/count\/([\w-]+)$/;
+let lastBase = null;
+let counterFromApp = false;
+
+function render({ keepScroll = false, focusId = null, focusField = null, fromHash = false } = {}) {
   const hash = location.hash || '#/';
+  const cm = hash.match(COUNT_ROUTE);
+  const base = cm ? cm[1] : hash;
+  // Opening/closing the counter or switching its plot keeps the page underneath as it is.
+  if (!(fromHash && base === lastBase)) renderPage(base, { keepScroll, focusId, focusField });
+  lastBase = base;
+  renderCounter(cm ? cm[2] : null);
+}
+
+function renderPage(hash, { keepScroll, focusId, focusField }) {
   let view = null, tab = 'sessions';
   for (const [re, fn, t] of routes) {
     const m = hash.match(re);
@@ -1141,6 +1183,59 @@ function render({ keepScroll = false, focusId = null, focusField = null } = {}) 
     const el = $(`[data-id="${focusId}"][data-f="${focusField}"]`);
     if (el) { el.focus(); el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
   }
+}
+
+// Full-screen tree counter for use in the field: large buttons, screen kept awake.
+function renderCounter(pid) {
+  const el = $('#counter');
+  const p = pid && byId('plots', pid);
+  if (!p) {
+    el.hidden = true;
+    el.innerHTML = '';
+    document.body.classList.remove('locked');
+    releaseWake();
+    return;
+  }
+  const s = byId('sessions', p.sessionId);
+  const plots = plotsOf(p.sessionId);
+  const climbers = climbersOf(p.sessionId);
+  el.innerHTML = `
+    <div class="counter-head">
+      <button class="btn" data-action="closeCounter" data-id="${p.sessionId}">‹ Done</button>
+      <div class="counter-title"><div class="muted small">${h(sessionName(s))}</div><strong>${h(p.name || 'Plot')}</strong></div>
+      <div class="counter-total"><span data-calc="plotTrees_${p.id}">${num(plotTreeTotal(p))}</span><small>trees</small></div>
+    </div>
+    ${plots.length > 1 ? `<div class="plot-tabs">${plots.map(x => `<a href="#/session/${p.sessionId}/count/${x.id}" class="${x.id === p.id ? 'on' : ''}">${h(x.name || 'Plot')}</a>`).join('')}</div>` : ''}
+    <div class="counter-list">
+      ${climbers.map(w => `
+        <div class="big-counter">
+          <div class="bc-name">${workerLabel(w)}</div>
+          <div class="bc-row">
+            <button class="bc-minus" data-action="treeDec" data-plot="${p.id}" data-worker="${w.id}" aria-label="Remove one tree for ${workerLabel(w)}">−</button>
+            <div class="bc-count" data-count="${treeId(p.id, w.id)}">${treesOf(p.id, w.id)}</div>
+            <button class="bc-plus" data-action="treeInc" data-plot="${p.id}" data-worker="${w.id}" aria-label="Add one tree for ${workerLabel(w)}">+1</button>
+          </div>
+        </div>`).join('') || '<div class="empty">Add climbers in the Workers section first.</div>'}
+    </div>
+    <div class="counter-foot small"><span data-save></span></div>`;
+  el.hidden = false;
+  document.body.classList.add('locked');
+  refreshCalcs();
+  updateSyncUI();
+  requestWake();
+}
+
+let wakeLock = null;
+async function requestWake() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch { /* not supported or not allowed */ }
+}
+function releaseWake() {
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
 function refreshCalcs() {
@@ -1169,24 +1264,37 @@ function init() {
     e.target.closest('.paid-toggle').outerHTML = paidToggle(it);
     refreshCalcs();
   });
-  app.addEventListener('click', e => {
+  const onAction = e => {
     const b = e.target.closest('[data-action]');
     if (b && actions[b.dataset.action]) { e.preventDefault(); actions[b.dataset.action]({ ...b.dataset }); }
+  };
+  app.addEventListener('click', onAction);
+  $('#counter').addEventListener('click', onAction);
+  // Settings save as you type; connecting happens when you leave the field.
+  app.addEventListener('input', e => {
+    if (e.target.id !== 'cfgUrl' && e.target.id !== 'cfgToken') return;
+    store.config = { url: $('#cfgUrl').value.trim(), token: $('#cfgToken').value.trim() };
+    saveJSON('cp.config', store.config);
+    updateSyncUI();
   });
+  app.addEventListener('change', e => { if (e.target.id === 'cfgUrl' || e.target.id === 'cfgToken') sync(); });
   app.addEventListener('focusout', () => {
     setTimeout(() => { if (pendingRender && !isEditing()) { pendingRender = false; render({ keepScroll: true }); } }, 0);
   });
   $('#syncBtn').addEventListener('click', () => (configured() ? actions.syncNow() : (location.hash = '#/settings')));
-  addEventListener('hashchange', () => render());
+  addEventListener('hashchange', () => render({ fromHash: true }));
   addEventListener('online', () => sync());
   addEventListener('offline', updateSyncUI);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') sync();
+    if (document.visibilityState === 'visible') { sync(); if (!$('#counter').hidden) requestWake(); }
     else saveLocal();
   });
   initTooltips();
   render();
   sync();
+  // Keep retrying while changes are waiting, e.g. after poor signal on the farm.
+  setInterval(() => { if (Object.keys(store.outbox).length && navigator.onLine) sync(); }, 30000);
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
