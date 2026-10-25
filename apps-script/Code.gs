@@ -11,7 +11,7 @@
 const TABLES = {
   sessions:      { sheet: 'PluckingSessions', cols: ['id', 'name', 'date', 'status', 'workers', 'workerFee', 'climberRate', 'notes', 'updatedAt'] },
   workers:       { sheet: 'Workers',          cols: ['id', 'sessionId', 'name', 'type', 'fee', 'sortOrder', 'updatedAt'] },
-  plots:         { sheet: 'Plots',            cols: ['id', 'sessionId', 'name', 'workers', 'trees', 'coconuts', 'sortOrder', 'updatedAt'] },
+  plots:         { sheet: 'Plots',            cols: ['id', 'sessionId', 'name', 'workers', 'trees', 'coconuts', 'nutsTaken', 'nutRate', 'sortOrder', 'updatedAt'] },
   plotTrees:     { sheet: 'ClimberTrees',     cols: ['id', 'plotId', 'workerId', 'trees', 'updatedAt'] },
   transport:     { sheet: 'Transport',        cols: ['id', 'plotId', 'name', 'fee', 'sortOrder', 'updatedAt'] },
   dehusking:     { sheet: 'Dehusking',        cols: ['id', 'sessionId', 'date', 'coconuts', 'fee', 'notes', 'updatedAt'] },
